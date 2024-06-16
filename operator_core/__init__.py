@@ -381,7 +381,7 @@ class Operator:
         """
         # create healthcheck server
         server = uvicorn.Server(
-            ServerConfig(app=self.health_fastapi, port=self.health_port)
+            ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
         )
 
         await asyncio.gather(
