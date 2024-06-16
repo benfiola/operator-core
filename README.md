@@ -23,7 +23,15 @@ This repository holds the source code for the `bfiola-operator-core` package tha
 
 ## Usage
 
+This package is hosted on [pypi](https://pypi.org/project/bfiola-operator-core/) and can be installed with the following command:
+
+```shell
+pip install bfiola-operator-core
+```
+
 A full-featured example can be found in the [minio-operator-ext repository](https://github.com/benfiola/minio-operator-ext/blob/main/minio_operator_ext/operator.py)
+
+A simple example can be found in the [sample launch script](./dev.template.py).
 
 ## Development
 
