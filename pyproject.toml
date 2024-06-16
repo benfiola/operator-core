@@ -1,0 +1,19 @@
+[project]
+name = "bfiola-operator-core"
+version = "0.0.1"
+dependencies = [
+    "fastapi",
+    "kopf",
+    "kubernetes",
+    "pydantic",
+    "uvicorn"
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "twine"
+]
+
+[tool.setuptools.packages.find]
+include = ["operator_core"]
