@@ -206,6 +206,50 @@ class BaseModel(pydantic.BaseModel):
         return super().model_dump_json(**kwargs)
 
 
+class ResourceRefSpec(BaseModel):
+    """
+    Represents a reference to another kubernetes resource as defined in a resource spec.
+
+    The 'namespace' field is optional - if 'None' assumed to be the current namespace
+    of the containing object.
+    """
+
+    name: str
+    namespace: str | None = None
+
+    def resource_ref(self, default_namespace: str) -> "ResourceRef":
+        """
+        Convenience method to create a 'ResourceRef' object.
+
+        Will set the namespace to 'default_namespace' if namespace is None.
+        """
+        return ResourceRef(
+            name=self.name, namespace=self.namespace or default_namespace
+        )
+
+
+class ResourceKeyRefSpec(ResourceRefSpec):
+    """
+    Represents a reference to a key of a kubernetes resource as defined in a resource spec.
+    """
+
+    key: str
+
+
+class ResourceRef(BaseModel):
+    """
+    Represents a reference to a kubernetes resource.  Differs from `ResourceRefSpec` in that the namespace
+    field *must* be set.
+    """
+
+    name: str
+    namespace: str
+
+    @property
+    def fqn(self) -> str:
+        return f"{self.namespace}/{self.name}"
+
+
 SomeModel = TypeVar("SomeModel", bound=BaseModel)
 
 
@@ -403,4 +447,7 @@ __all__ = [
     "BaseModel",
     "Operator",
     "OperatorError",
+    "ResourceRef",
+    "ResourceRefSpec",
+    "ResourceKeyRefSpec",
 ]
