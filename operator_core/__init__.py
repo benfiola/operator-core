@@ -250,6 +250,14 @@ class ResourceRef(BaseModel):
         return f"{self.namespace}/{self.name}"
 
 
+class ResourceKeyRef(ResourceRef):
+    """
+    Represents a reference to a key of a kubernetes resource as defined in a resource.
+    """
+
+    key: str
+
+
 SomeModel = TypeVar("SomeModel", bound=BaseModel)
 
 
@@ -448,6 +456,7 @@ __all__ = [
     "Operator",
     "OperatorError",
     "ResourceRef",
+    "ResourceKeyRef",
     "ResourceRefSpec",
     "ResourceKeyRefSpec",
 ]
