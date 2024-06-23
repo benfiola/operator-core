@@ -15,6 +15,7 @@ This repository holds the source code for the `bfiola-operator-core` package tha
 - Base operator class that:
   - Creates a kubernetes client
   - Performs operator login
+  - Provides helper methods to operate against the kubernetes api
   - Exposes a healthcheck endpoint
 - Utilities:
   - Run sync methods aynchronously
