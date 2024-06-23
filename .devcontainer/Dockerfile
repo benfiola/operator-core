@@ -51,3 +51,11 @@ cd /opt/minikube && \
 curl -o /opt/minikube/minikube -fsSL "https://storage.googleapis.com/minikube/releases/v1.33.1/minikube-linux-${TARGETARCH}" && \
 chmod +x /opt/minikube/minikube
 ENV PATH="/opt/minikube:${PATH}"
+
+# install kubectl
+RUN apt -y install curl && \
+    mkdir -p /opt/kubectl && \
+    cd /opt/kubectl && \
+    curl -o /opt/kubectl/kubectl -fsSL "https://dl.k8s.io/release/v1.29.4/bin/linux/${TARGETARCH}/kubectl" && \
+    chmod +x /opt/kubectl/kubectl
+ENV PATH="/opt/kubectl:${PATH}"

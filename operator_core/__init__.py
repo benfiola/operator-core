@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import functools
 import inspect
 import json
@@ -12,6 +13,7 @@ import kopf
 import kopf._cogs.structs.diffs
 import kubernetes
 import pydantic
+import urllib3
 import uvicorn
 
 
@@ -206,56 +208,75 @@ class BaseModel(pydantic.BaseModel):
         return super().model_dump_json(**kwargs)
 
 
-class ResourceRefSpec(BaseModel):
+class KnownClusterResourceRefSpec(BaseModel):
     """
-    Represents a reference to another kubernetes resource as defined in a resource spec.
+    A 'known' cluster resource ref spec is a resource ref whose api version and plural are contextually known.
 
-    The 'namespace' field is optional - if 'None' assumed to be the current namespace
-    of the containing object.
+    (e.g., one can infer that 'namespaceRef' has plural 'namespaces' and apiVersion 'v1')
+    """
+
+    name: str
+
+
+class KnownResourceRefSpec(BaseModel):
+    """
+    A 'known' resource ref spec is a resource ref whose api version and plural are contextually known.
+
+    Additionally, the namespace can be omitted - as one can infer the namespace from the parent resource.
+
+    (e.g., one can infer that 'secretRef' has plural 'secrets' and apiVersion 'v1')
     """
 
     name: str
     namespace: str | None = None
 
-    def resource_ref(self, default_namespace: str) -> "ResourceRef":
-        """
-        Convenience method to create a 'ResourceRef' object.
 
-        Will set the namespace to 'default_namespace' if namespace is None.
-        """
-        return ResourceRef(
-            name=self.name, namespace=self.namespace or default_namespace
-        )
-
-
-class ResourceKeyRefSpec(ResourceRefSpec):
+class KnownResourceKeyRefSpec(KnownResourceRefSpec):
     """
-    Represents a reference to a key of a kubernetes resource as defined in a resource spec.
+    A 'known' resource key ref spec carries all the assumptions of a 'KnownResourceRefSpec' but is intended to
+    additionally require a 'key' field to reference an individual member of a parent resource (e.g., config maps + secrets)
     """
 
     key: str
 
 
-class ResourceRef(BaseModel):
+cluster_namespace: str = "__cluster__"
+
+
+class ResourceTypeRef(BaseModel):
     """
-    Represents a reference to a kubernetes resource.  Differs from `ResourceRefSpec` in that the namespace
-    field *must* be set.
+    A resource type ref refers to a resource type - useful primarily for list operations
     """
 
+    api_version: str
+    plural: str
+    namespace: str
+
+    @property
+    def is_namespaced(self) -> bool:
+        return self.namespace != cluster_namespace
+
+
+class ResourceRef(BaseModel):
+    """
+    A resource ref refers to a resource reference - useful for resource-level kubernetes api interactions.
+    """
+
+    api_version: str
+    plural: str
     name: str
     namespace: str
 
     @property
     def fqn(self) -> str:
-        return f"{self.namespace}/{self.name}"
+        value = f"{self.name}"
+        if self.is_namespaced:
+            value = f"{self.namespace}:{value}"
+        return value
 
-
-class ResourceKeyRef(ResourceRef):
-    """
-    Represents a reference to a key of a kubernetes resource as defined in a resource.
-    """
-
-    key: str
+    @property
+    def is_namespaced(self) -> bool:
+        return self.namespace != cluster_namespace
 
 
 SomeModel = TypeVar("SomeModel", bound=BaseModel)
@@ -393,6 +414,132 @@ class Operator:
 
         return response
 
+    def get_resource_url(self, resource_ref: ResourceRef) -> str:
+        """
+        Gets a resource url given a resource ref
+        """
+        url = f"/apis/{resource_ref.api_version}"
+        if resource_ref.is_namespaced:
+            url = f"{url}/namespaces/{resource_ref.namespace}"
+        url = f"{url}/{resource_ref.plural}/{resource_ref.name}"
+        return url
+
+    async def get_resource(self, resource_ref: ResourceRef) -> dict | None:
+        """
+        Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
+        """
+
+        def inner():
+            return cast(
+                urllib3.response.HTTPResponse,
+                self.kube_client.call_api(
+                    self.get_resource_url(resource_ref),
+                    "GET",
+                    _return_http_data_only=True,
+                    _preload_content=False,
+                ),
+            )
+
+        try:
+            response = await run_sync(inner)
+        except kubernetes.client.ApiException as e:
+            error_body = cast(bytes, e.body)
+            data = json.loads(error_body.decode("utf-8"))
+            message = data["message"]
+            if f'"{resource_ref.name}" not found' not in message:
+                raise e
+            return None
+
+        data = json.loads(response.data.decode("utf-8"))
+        return data
+
+    async def list_resources(self, resource_type_ref: ResourceTypeRef) -> list[dict]:
+        """
+        Lists kubernetes resources
+        """
+        url = f"/apis/{resource_type_ref.api_version}"
+        if resource_type_ref.is_namespaced:
+            url = f"{url}/namespaces/{resource_type_ref.namespace}"
+        url = f"{url}/{resource_type_ref.plural}"
+
+        def inner():
+            return cast(
+                urllib3.response.HTTPResponse,
+                self.kube_client.call_api(
+                    url, "GET", _return_http_data_only=True, _preload_content=False
+                ),
+            )
+
+        response = await run_sync(inner)
+        data = json.loads(response.data.decode("utf-8"))
+        return data["items"]
+
+    async def delete_resource(self, resource_ref: ResourceRef):
+        """
+        Deletes a kubernetes resource
+        """
+
+        def inner():
+            return cast(
+                urllib3.response.HTTPResponse,
+                self.kube_client.call_api(
+                    self.get_resource_url(resource_ref),
+                    "DELETE",
+                    _return_http_data_only=True,
+                    _preload_content=False,
+                ),
+            )
+
+        return await run_sync(inner)
+
+    async def update_resource(self, resource_ref: ResourceRef, body: dict):
+        """
+        Replaces an existing kubernetes resource (performing an update).
+        """
+
+        def inner():
+            return cast(
+                urllib3.response.HTTPResponse,
+                self.kube_client.call_api(
+                    self.get_resource_url(resource_ref),
+                    "PUT",
+                    body=body,
+                    _return_http_data_only=True,
+                    _preload_content=False,
+                ),
+            )
+
+        return await run_sync(inner)
+
+    async def create_owner_reference(self, resource_ref: ResourceRef) -> dict:
+        """
+        Creates an owner reference for the given resource ref.
+
+        NOTE: Calls `get_resource` from the kubernetes api
+        """
+        resource = await self.get_resource(resource_ref)
+        if resource is None:
+            raise ValueError(f"unable to get resource: {resource_ref.fqn}")
+        return {
+            "apiVersion": resource["apiVersion"],
+            "kind": resource["kind"],
+            "name": resource["metadata"]["name"],
+            "uid": resource["metadata"]["uid"],
+        }
+
+    def get_resource_key(self, resource: dict, key: str) -> str:
+        """
+        Retrieves a key from a resource.
+        """
+        if resource["kind"] == "Secret":
+            data = resource["data"][key]
+            data = base64.b64decode(data).decode("utf-8")
+        elif resource["kind"] == "ConfigMap":
+            data = resource["data"][key]
+        else:
+            raise NotImplementedError(resource_fqn(resource))
+        return data
+
     @hook("startup")
     async def startup(self, **kwargs):
         """
@@ -455,8 +602,9 @@ __all__ = [
     "BaseModel",
     "Operator",
     "OperatorError",
+    "KnownClusterResourceRefSpec",
+    "KnownResourceRefSpec",
+    "KnownResourceKeyRefSpec",
+    "cluster_namespace",
     "ResourceRef",
-    "ResourceKeyRef",
-    "ResourceRefSpec",
-    "ResourceKeyRefSpec",
 ]
