@@ -414,15 +414,35 @@ class Operator:
 
         return response
 
+    def get_resource_type_url(self, resource_type_ref: ResourceTypeRef) -> str:
+        """
+        Gets a url given a resource type ref
+        """
+        api_version_parts = resource_type_ref.api_version.split("/")
+        if len(api_version_parts) == 1:
+            # core apis use the /api base
+            url = f"/api/{resource_type_ref.api_version}"
+        else:
+            # everything else uses the /apis base
+            url = f"/apis/{resource_type_ref.api_version}"
+
+        if resource_type_ref.is_namespaced:
+            url = f"{url}/namespaces/{resource_type_ref.namespace}"
+
+        url = f"{url}/{resource_type_ref.plural}"
+
+        return url
+
     def get_resource_url(self, resource_ref: ResourceRef) -> str:
         """
-        Gets a resource url given a resource ref
+        Gets a url given a resource ref
         """
-        url = f"/apis/{resource_ref.api_version}"
-        if resource_ref.is_namespaced:
-            url = f"{url}/namespaces/{resource_ref.namespace}"
-        url = f"{url}/{resource_ref.plural}/{resource_ref.name}"
-        return url
+        resource_type_ref = ResourceTypeRef(
+            api_version=resource_ref.api_version,
+            plural=resource_ref.plural,
+            namespace=resource_ref.namespace,
+        )
+        return f"{self.get_resource_type_url(resource_type_ref)}/{resource_ref.name}"
 
     async def get_resource(self, resource_ref: ResourceRef) -> dict | None:
         """
@@ -457,16 +477,15 @@ class Operator:
         """
         Lists kubernetes resources
         """
-        url = f"/apis/{resource_type_ref.api_version}"
-        if resource_type_ref.is_namespaced:
-            url = f"{url}/namespaces/{resource_type_ref.namespace}"
-        url = f"{url}/{resource_type_ref.plural}"
 
         def inner():
             return cast(
                 urllib3.response.HTTPResponse,
                 self.kube_client.call_api(
-                    url, "GET", _return_http_data_only=True, _preload_content=False
+                    self.get_resource_type_url(resource_type_ref),
+                    "GET",
+                    _return_http_data_only=True,
+                    _preload_content=False,
                 ),
             )
 
