@@ -1,6 +1,6 @@
 [project]
 name = "bfiola-operator-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
     "fastapi",
     "kopf",
