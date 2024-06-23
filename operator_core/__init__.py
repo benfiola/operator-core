@@ -463,9 +463,11 @@ class Operator:
         try:
             response = await run_sync(inner)
         except kubernetes.client.ApiException as e:
-            error_body = cast(bytes, e.body)
-            data = json.loads(error_body.decode("utf-8"))
-            message = data["message"]
+            try:
+                data = json.loads(cast(Any, e.body).decode("utf-8"))
+                message = data["message"]
+            except Exception:
+                raise e
             if f'"{resource_ref.name}" not found' not in message:
                 raise e
             return None
