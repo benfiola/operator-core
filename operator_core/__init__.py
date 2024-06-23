@@ -514,6 +514,25 @@ class Operator:
 
         return await run_sync(inner)
 
+    async def create_resource(self, resource_ref: ResourceRef, body: dict):
+        """
+        Creates a new kubernetes resource
+        """
+
+        def inner():
+            return cast(
+                urllib3.response.HTTPResponse,
+                self.kube_client.call_api(
+                    self.get_resource_url(resource_ref),
+                    "POST",
+                    body=body,
+                    _return_http_data_only=True,
+                    _preload_content=False,
+                ),
+            )
+
+        return await run_sync(inner)
+    
     async def update_resource(self, resource_ref: ResourceRef, body: dict):
         """
         Replaces an existing kubernetes resource (performing an update).
