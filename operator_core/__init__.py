@@ -257,15 +257,12 @@ class ResourceTypeRef(BaseModel):
         return self.namespace != cluster_namespace
 
 
-class ResourceRef(BaseModel):
+class ResourceRef(ResourceTypeRef):
     """
     A resource ref refers to a resource reference - useful for resource-level kubernetes api interactions.
     """
 
-    api_version: str
-    plural: str
     name: str
-    namespace: str
 
     @property
     def fqn(self) -> str:
@@ -274,9 +271,13 @@ class ResourceRef(BaseModel):
             value = f"{self.namespace}:{value}"
         return value
 
-    @property
-    def is_namespaced(self) -> bool:
-        return self.namespace != cluster_namespace
+
+class ResourceKeyRef(ResourceRef):
+    """
+    A resource key ref refers to a key within a resource reference
+    """
+
+    key: str
 
 
 SomeModel = TypeVar("SomeModel", bound=BaseModel)
@@ -628,4 +629,5 @@ __all__ = [
     "KnownResourceKeyRefSpec",
     "cluster_namespace",
     "ResourceRef",
+    "ResourceKeyRef"
 ]
