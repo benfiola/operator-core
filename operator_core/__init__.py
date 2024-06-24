@@ -208,38 +208,6 @@ class BaseModel(pydantic.BaseModel):
         return super().model_dump_json(**kwargs)
 
 
-class KnownClusterResourceRefSpec(BaseModel):
-    """
-    A 'known' cluster resource ref spec is a resource ref whose api version and plural are contextually known.
-
-    (e.g., one can infer that 'namespaceRef' has plural 'namespaces' and apiVersion 'v1')
-    """
-
-    name: str
-
-
-class KnownResourceRefSpec(BaseModel):
-    """
-    A 'known' resource ref spec is a resource ref whose api version and plural are contextually known.
-
-    Additionally, the namespace can be omitted - as one can infer the namespace from the parent resource.
-
-    (e.g., one can infer that 'secretRef' has plural 'secrets' and apiVersion 'v1')
-    """
-
-    name: str
-    namespace: str | None = None
-
-
-class KnownResourceKeyRefSpec(KnownResourceRefSpec):
-    """
-    A 'known' resource key ref spec carries all the assumptions of a 'KnownResourceRefSpec' but is intended to
-    additionally require a 'key' field to reference an individual member of a parent resource (e.g., config maps + secrets)
-    """
-
-    key: str
-
-
 cluster_namespace: str = "__cluster__"
 
 
@@ -532,7 +500,7 @@ class Operator:
             )
 
         return await run_sync(inner)
-    
+
     async def update_resource(self, resource_ref: ResourceRef, body: dict):
         """
         Replaces an existing kubernetes resource (performing an update).
@@ -648,5 +616,5 @@ __all__ = [
     "KnownResourceKeyRefSpec",
     "cluster_namespace",
     "ResourceRef",
-    "ResourceKeyRef"
+    "ResourceKeyRef",
 ]
