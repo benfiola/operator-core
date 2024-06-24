@@ -218,7 +218,7 @@ class ResourceTypeRef(BaseModel):
     A resource type ref refers to a resource type - useful primarily for list operations
     """
 
-    api_version: str
+    api_version: str = pydantic.Field(..., alias=str("apiVersion"))
     plural: str
     namespace: str
 
