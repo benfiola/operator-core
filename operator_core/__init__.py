@@ -186,6 +186,8 @@ async def run_sync(f: Callable[[], RunSyncRV]) -> RunSyncRV:
 
 
 class BaseModel(pydantic.BaseModel):
+    model_config = {"populate_by_name": True}
+
     def model_dump(self, **kwargs):
         """
         pydantic's default `model_dump` method will produce a `dict` that (sometimes) cannot
@@ -611,9 +613,6 @@ __all__ = [
     "BaseModel",
     "Operator",
     "OperatorError",
-    "KnownClusterResourceRefSpec",
-    "KnownResourceRefSpec",
-    "KnownResourceKeyRefSpec",
     "cluster_namespace",
     "ResourceRef",
     "ResourceKeyRef",
