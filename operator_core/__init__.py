@@ -311,6 +311,193 @@ class ServerConfig(uvicorn.Config):
         pass
 
 
+async def create_kube_client(
+    kube_config: pathlib.Path | None = None,
+) -> kubernetes.client.ApiClient:
+    """
+    Creates a kubernetes api client.
+
+    Will default to in-cluster configuration unless a kube config path is provided.
+    """
+    config = kubernetes.client.Configuration()
+    if kube_config:
+        kubernetes.config.load_kube_config(
+            config_file=f"{kube_config}", client_configuration=config
+        )
+    else:
+        kubernetes.config.load_incluster_config(client_configuration=config)
+    kube_client = kubernetes.client.ApiClient(config)
+    return kube_client
+
+
+def get_resource_type_url(resource_type_ref: ResourceTypeRef) -> str:
+    """
+    Gets a url given a resource type ref
+    """
+    api_version_parts = resource_type_ref.api_version.split("/")
+    if len(api_version_parts) == 1:
+        # core apis use the /api base
+        url = f"/api/{resource_type_ref.api_version}"
+    else:
+        # everything else uses the /apis base
+        url = f"/apis/{resource_type_ref.api_version}"
+
+    if resource_type_ref.is_namespaced:
+        url = f"{url}/namespaces/{resource_type_ref.namespace}"
+
+    url = f"{url}/{resource_type_ref.plural}"
+
+    return url
+
+
+def get_resource_url(resource_ref: ResourceRef) -> str:
+    """
+    Gets a url given a resource ref
+    """
+    resource_type_ref = ResourceTypeRef(
+        api_version=resource_ref.api_version,
+        plural=resource_ref.plural,
+        namespace=resource_ref.namespace,
+    )
+    return f"{get_resource_type_url(resource_type_ref)}/{resource_ref.name}"
+
+
+async def get_resource(
+    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
+) -> dict | None:
+    """
+    Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
+    """
+
+    def inner():
+        return cast(
+            urllib3.response.HTTPResponse,
+            kube_client.call_api(
+                get_resource_url(resource_ref),
+                "GET",
+                _return_http_data_only=True,
+                _preload_content=False,
+            ),
+        )
+
+    try:
+        response = await run_sync(inner)
+    except kubernetes.client.ApiException as e:
+        try:
+            data = json.loads(cast(Any, e.body).decode("utf-8"))
+            message = data["message"]
+        except Exception:
+            raise e
+        if f'"{resource_ref.name}" not found' not in message:
+            raise e
+        return None
+
+    data = json.loads(response.data.decode("utf-8"))
+    return data
+
+
+async def list_resources(
+    kube_client: kubernetes.client.ApiClient, resource_type_ref: ResourceTypeRef
+) -> list[dict]:
+    """
+    Lists kubernetes resources
+    """
+
+    def inner():
+        return cast(
+            urllib3.response.HTTPResponse,
+            kube_client.call_api(
+                get_resource_type_url(resource_type_ref),
+                "GET",
+                _return_http_data_only=True,
+                _preload_content=False,
+            ),
+        )
+
+    response = await run_sync(inner)
+    data = json.loads(response.data.decode("utf-8"))
+    return data["items"]
+
+
+async def delete_resource(
+    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
+):
+    """
+    Deletes a kubernetes resource
+    """
+
+    def inner():
+        return cast(
+            urllib3.response.HTTPResponse,
+            kube_client.call_api(
+                get_resource_url(resource_ref),
+                "DELETE",
+                _return_http_data_only=True,
+                _preload_content=False,
+            ),
+        )
+
+    return await run_sync(inner)
+
+
+async def create_resource(
+    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
+):
+    """
+    Creates a new kubernetes resource
+    """
+
+    def inner():
+        return cast(
+            urllib3.response.HTTPResponse,
+            kube_client.call_api(
+                get_resource_url(resource_ref),
+                "POST",
+                body=body,
+                _return_http_data_only=True,
+                _preload_content=False,
+            ),
+        )
+
+    return await run_sync(inner)
+
+
+async def update_resource(
+    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
+):
+    """
+    Replaces an existing kubernetes resource (performing an update).
+    """
+
+    def inner():
+        return cast(
+            urllib3.response.HTTPResponse,
+            kube_client.call_api(
+                get_resource_url(resource_ref),
+                "PUT",
+                body=body,
+                _return_http_data_only=True,
+                _preload_content=False,
+            ),
+        )
+
+    return await run_sync(inner)
+
+
+def get_resource_key(resource: dict, key: str) -> str:
+    """
+    Retrieves a key from a resource.
+    """
+    if resource["kind"] == "Secret":
+        data = resource["data"][key]
+        data = base64.b64decode(data).decode("utf-8")
+    elif resource["kind"] == "ConfigMap":
+        data = resource["data"][key]
+    else:
+        raise NotImplementedError(resource_fqn(resource))
+    return data
+
+
 class Operator:
     """
     Implements a kubernetes operator capable of syncing minio tenants and
@@ -389,138 +576,46 @@ class Operator:
         """
         Gets a url given a resource type ref
         """
-        api_version_parts = resource_type_ref.api_version.split("/")
-        if len(api_version_parts) == 1:
-            # core apis use the /api base
-            url = f"/api/{resource_type_ref.api_version}"
-        else:
-            # everything else uses the /apis base
-            url = f"/apis/{resource_type_ref.api_version}"
-
-        if resource_type_ref.is_namespaced:
-            url = f"{url}/namespaces/{resource_type_ref.namespace}"
-
-        url = f"{url}/{resource_type_ref.plural}"
-
-        return url
+        return get_resource_type_url(resource_type_ref)
 
     def get_resource_url(self, resource_ref: ResourceRef) -> str:
         """
         Gets a url given a resource ref
         """
-        resource_type_ref = ResourceTypeRef(
-            api_version=resource_ref.api_version,
-            plural=resource_ref.plural,
-            namespace=resource_ref.namespace,
-        )
-        return f"{self.get_resource_type_url(resource_type_ref)}/{resource_ref.name}"
+        return get_resource_url(resource_ref)
 
     async def get_resource(self, resource_ref: ResourceRef) -> dict | None:
         """
         Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
         """
-
-        def inner():
-            return cast(
-                urllib3.response.HTTPResponse,
-                self.kube_client.call_api(
-                    self.get_resource_url(resource_ref),
-                    "GET",
-                    _return_http_data_only=True,
-                    _preload_content=False,
-                ),
-            )
-
-        try:
-            response = await run_sync(inner)
-        except kubernetes.client.ApiException as e:
-            try:
-                data = json.loads(cast(Any, e.body).decode("utf-8"))
-                message = data["message"]
-            except Exception:
-                raise e
-            if f'"{resource_ref.name}" not found' not in message:
-                raise e
-            return None
-
-        data = json.loads(response.data.decode("utf-8"))
-        return data
+        return await get_resource(self.kube_client, resource_ref)
 
     async def list_resources(self, resource_type_ref: ResourceTypeRef) -> list[dict]:
         """
         Lists kubernetes resources
         """
 
-        def inner():
-            return cast(
-                urllib3.response.HTTPResponse,
-                self.kube_client.call_api(
-                    self.get_resource_type_url(resource_type_ref),
-                    "GET",
-                    _return_http_data_only=True,
-                    _preload_content=False,
-                ),
-            )
-
-        response = await run_sync(inner)
-        data = json.loads(response.data.decode("utf-8"))
-        return data["items"]
+        return await list_resources(self.kube_client, resource_type_ref)
 
     async def delete_resource(self, resource_ref: ResourceRef):
         """
         Deletes a kubernetes resource
         """
-
-        def inner():
-            return cast(
-                urllib3.response.HTTPResponse,
-                self.kube_client.call_api(
-                    self.get_resource_url(resource_ref),
-                    "DELETE",
-                    _return_http_data_only=True,
-                    _preload_content=False,
-                ),
-            )
-
-        return await run_sync(inner)
+        return await delete_resource(self.kube_client, resource_ref)
 
     async def create_resource(self, resource_ref: ResourceRef, body: dict):
         """
         Creates a new kubernetes resource
         """
 
-        def inner():
-            return cast(
-                urllib3.response.HTTPResponse,
-                self.kube_client.call_api(
-                    self.get_resource_url(resource_ref),
-                    "POST",
-                    body=body,
-                    _return_http_data_only=True,
-                    _preload_content=False,
-                ),
-            )
-
-        return await run_sync(inner)
+        return await create_resource(self.kube_client, resource_ref, body)
 
     async def update_resource(self, resource_ref: ResourceRef, body: dict):
         """
         Replaces an existing kubernetes resource (performing an update).
         """
 
-        def inner():
-            return cast(
-                urllib3.response.HTTPResponse,
-                self.kube_client.call_api(
-                    self.get_resource_url(resource_ref),
-                    "PUT",
-                    body=body,
-                    _return_http_data_only=True,
-                    _preload_content=False,
-                ),
-            )
-
-        return await run_sync(inner)
+        return await update_resource(self.kube_client, resource_ref, body)
 
     async def create_owner_reference(self, resource_ref: ResourceRef) -> dict:
         """
@@ -542,30 +637,14 @@ class Operator:
         """
         Retrieves a key from a resource.
         """
-        if resource["kind"] == "Secret":
-            data = resource["data"][key]
-            data = base64.b64decode(data).decode("utf-8")
-        elif resource["kind"] == "ConfigMap":
-            data = resource["data"][key]
-        else:
-            raise NotImplementedError(resource_fqn(resource))
-        return data
+        return get_resource_key(resource, key)
 
     @hook("startup")
     async def startup(self, **kwargs):
         """
         Initializes the operator
         """
-        config = kubernetes.client.Configuration()
-        if self.kube_config:
-            self.logger.debug(f"kube client using kubeconfig: {self.kube_config}")
-            kubernetes.config.load_kube_config(
-                config_file=f"{self.kube_config}", client_configuration=config
-            )
-        else:
-            self.logger.debug(f"kube client using in-cluster")
-            kubernetes.config.load_incluster_config(client_configuration=config)
-        self.kube_client = kubernetes.client.ApiClient(config)
+        self.kube_client = await create_kube_client(self.kube_config)
 
     @hook("login")
     async def login(self, **kwargs):
@@ -603,17 +682,22 @@ class Operator:
 
 
 __all__ = [
+    "get_diff",
     "apply_diff_item",
     "filter_immutable_diff_items",
-    "get_diff",
+    "create_kube_client",
+    "create_resource",
+    "delete_resource",
+    "list_resources",
+    "update_resource",
     "hook",
     "resource_namespace",
     "resource_fqn",
     "run_sync",
     "BaseModel",
-    "Operator",
     "OperatorError",
     "cluster_namespace",
     "ResourceRef",
     "ResourceKeyRef",
+    "Operator",
 ]
