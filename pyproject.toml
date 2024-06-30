@@ -1,6 +1,6 @@
 [project]
 name = "bfiola-operator-core"
-version = "0.2.3"
+version = "0.0.0"
 dependencies = [
     "fastapi",
     "kopf",
@@ -12,8 +12,19 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "build",
+    "python-semantic-release",
+    "toml",
     "twine"
 ]
+
+[tool.semantic_release.branches.dev]
+match = "dev"
+prerelease = true
+prerelease_token = "rc"
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
 
 [tool.setuptools.packages.find]
 include = ["operator_core"]
