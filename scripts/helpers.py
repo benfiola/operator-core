@@ -104,7 +104,7 @@ def cmd_publish(*, token: str):
     dist_folder = pathlib.Path.cwd().joinpath("dist")
     if not dist_folder.exists():
         raise FileNotFoundError(dist_folder)
-    pkg_name = packaging.utils.canonicalize_name(name).replace("-", "_")
+    pkg_name = packaging.utils.canonicalize_name(name)
     pkg_version = packaging.utils.canonicalize_version(version)
     files = [
         dist_folder.joinpath(f"{pkg_name}-{pkg_version}-py3-none-any.whl"),
@@ -118,7 +118,9 @@ def cmd_publish(*, token: str):
             "python",
             "-m",
             "twine",
+            "--no-color",
             "upload",
+            "--disable-progress-bar",
             "--repository-url=https://upload.pypi.org/legacy/",
             "-u=__token__",
             f"-p={token}",
