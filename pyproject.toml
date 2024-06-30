@@ -12,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "build",
+    "packaging",
     "python-semantic-release",
     "toml",
     "twine"
