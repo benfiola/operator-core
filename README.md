@@ -6,21 +6,12 @@ This repository holds the source code for the `bfiola-operator-core` package tha
 
 ## Features
 
-- Kubernetes friendly pydantic base models
-- Model helper methods:
-  - Calculates diffs between models
-  - Filters immutable fields
-  - Applies diffs for incremental updates
-- Decorator-based hook system to register operator methods with resource events
+- Kubernetes friendly pydantic base models (`GlobalResource`, `NamespacedResource`)
 - Base operator class that:
   - Creates a kubernetes client
   - Performs operator login
-  - Provides helper methods to operate against the kubernetes api
   - Exposes a healthcheck endpoint
-- Utilities:
-  - Run sync methods aynchronously
-  - Derive resource namespace names
-  - Derive resource 'fully-qualified' names
+  - Simplifies resource management (requiring only a `sync` and `delete` method per resource)
 
 ## Usage
 
@@ -53,6 +44,8 @@ This will:
 
 - Delete an existing dev cluster if one exists
 - Create a new dev cluster
+- Creates sample custom resource definitions
+- Creates sample custom resources
 
 ### Creating a launch script
 

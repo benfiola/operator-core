@@ -6,7 +6,7 @@ ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND="noninteractive"
 
-RUN apt -y update
+RUN echo "test" > /tmp/test && apt -y update
 
 # install standalone tooling
 RUN apt -y install vim
@@ -59,3 +59,20 @@ RUN apt -y install curl && \
     curl -o /opt/kubectl/kubectl -fsSL "https://dl.k8s.io/release/v1.29.4/bin/linux/${TARGETARCH}/kubectl" && \
     chmod +x /opt/kubectl/kubectl
 ENV PATH="/opt/kubectl:${PATH}"
+
+# install kubectl
+RUN apt -y install curl && \
+    mkdir -p /opt/kubectl && \
+    cd /opt/kubectl && \
+    curl -o /opt/kubectl/kubectl -fsSL "https://dl.k8s.io/release/v1.29.4/bin/linux/${TARGETARCH}/kubectl" && \
+    chmod +x /opt/kubectl/kubectl
+ENV PATH="/opt/kubectl:${PATH}"
+
+# install k9s
+RUN apt -y install curl && \
+    mkdir -p /opt/k9s && \
+    cd /opt/k9s && \
+    curl -fsSL -o k9s.tar.gz "https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_${TARGETARCH}.tar.gz" && \
+    tar xvzf k9s.tar.gz && \
+    rm -rf k9s.tar.gz
+ENV PATH="/opt/k9s:${PATH}"

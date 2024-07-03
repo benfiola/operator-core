@@ -1,0 +1,83 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: namespaceds.bfiola.dev
+spec:
+  group: bfiola.dev
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                mutable:
+                  type: string
+                immutable:
+                  type: string
+            status:
+              type: object
+              properties:
+                currentSpec:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Mutable
+          type: string
+          description: Mutable
+          jsonPath: .status.currentSpec.mutable
+        - name: Immutable
+          type: string
+          description: Immutable
+          jsonPath: .status.currentSpec.immutable
+  scope: Namespaced
+  names:
+    plural: namespaceds
+    singular: namespaced
+    kind: Namespaced
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: globals.bfiola.dev
+spec:
+  group: bfiola.dev
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                mutable:
+                  type: string
+                immutable:
+                  type: string
+            status:
+              type: object
+              properties:
+                currentSpec:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Mutable
+          type: string
+          description: Mutable
+          jsonPath: .status.currentSpec.mutable
+        - name: Immutable
+          type: string
+          description: Immutable
+          jsonPath: .status.currentSpec.immutable
+  scope: Cluster
+  names:
+    plural: globals
+    singular: global
+    kind: Global

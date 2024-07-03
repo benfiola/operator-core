@@ -18,3 +18,9 @@ minikube delete || true
 
 echo "create minikube cluster"
 minikube start --force
+
+echo "deploy test custom resources"
+kubectl apply -f ./manifests/crds.yaml
+
+echo "deploy example resources"
+kubectl apply -f ./manifests/example-resources.yaml

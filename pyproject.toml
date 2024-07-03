@@ -4,7 +4,8 @@ version = "0.0.0"
 dependencies = [
     "fastapi",
     "kopf",
-    "kubernetes",
+    "lightkube",
+    "lightkube-models",
     "pydantic",
     "uvicorn"
 ]
@@ -13,15 +14,6 @@ dependencies = [
 dev = [
     "bfiola-devtools"
 ]
-
-[tool.semantic_release.branches.dev]
-match = "dev"
-prerelease = true
-prerelease_token = "rc"
-
-[tool.semantic_release.branches.main]
-match = "main"
-prerelease = false
 
 [tool.setuptools.packages.find]
 include = ["operator_core"]

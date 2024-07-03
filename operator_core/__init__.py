@@ -1,19 +1,33 @@
 import asyncio
-import base64
+import contextlib
 import functools
 import inspect
-import json
 import logging
 import os
 import pathlib
-from typing import Any, Callable, Iterable, Protocol, TypeVar, cast
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    ClassVar,
+    Coroutine,
+    Generic,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 import fastapi
 import kopf
 import kopf._cogs.structs.diffs
-import kubernetes
+import lightkube.config.kubeconfig
+import lightkube.core.async_client
+import lightkube.core.resource
+import lightkube.core.resource_registry
+import lightkube.generic_resource
+import lightkube.models.meta_v1
 import pydantic
-import urllib3
 import uvicorn
 
 
@@ -33,475 +47,139 @@ class OperatorError(Exception):
         self.recoverable = recoverable
 
 
-WrappedFn = TypeVar("WrappedFn", bound=Callable)
+ResourceSpec = TypeVar("ResourceSpec")
 
 
-class HookFn(Protocol[WrappedFn]):
+class ResourceStatus(pydantic.BaseModel, Generic[ResourceSpec]):
     """
-    A callable with kopf hook/event data embedded
-    """
-
-    _hook_fn: bool
-    _hook_event: str
-    _hook_args: tuple[Any, ...]
-    _hook_kwargs: dict[str, Any]
-    __call__: WrappedFn
-
-
-def hook(event: str, *args, **kwargs):
-    """
-    A decorator that attaches kopf hook/event data to an operator instance function
+    A generic data container for resource statuses.
     """
 
-    def inner(f: WrappedFn) -> HookFn[WrappedFn]:
-        if not inspect.iscoroutinefunction(f):
-            # only support async functions
-            raise NotImplementedError()
-
-        setattr(f, "_hook_fn", True)
-        setattr(f, "_hook_event", event)
-        setattr(f, "_hook_args", args)
-        setattr(f, "_hook_kwargs", kwargs)
-
-        return cast(HookFn[WrappedFn], f)
-
-    return inner
+    # the currently applied spec for the resource (can differ from the resource 'spec' when an invalid edit is made)
+    currentSpec: ResourceSpec | None = None
 
 
-def iter_hooks(obj: object) -> Iterable[HookFn]:
+class ResourceMeta(TypedDict):
     """
-    Given an object, iterates over instance members and yields functions decorated with the `hook` decorator.
-    """
-    for attr in dir(obj):
-        val = getattr(obj, attr)
-        if not callable(val):
-            continue
-        if not hasattr(val, "__dict__"):
-            continue
-        if "_hook_fn" not in val.__dict__:
-            continue
-        val = cast(HookFn, val)
-        yield val
-
-
-def resource_namespace(resource: dict | kopf.Body) -> str:
-    """
-    Gets the namespace attached to a resource - returns 'default' if unset.
-
-    NOTE: Assumes 'resource' is namespaced.
-    """
-    return resource["metadata"].get("namespace", "default")
-
-
-def resource_fqn(resource: dict | kopf.Body) -> str:
-    """
-    Returns a full-qualified name for a dict-like kubernetes resource.
-
-    A 'fully-qualfied name' is <namespace>/<name>
-    """
-    namespace = resource_namespace(resource)
-    name = resource["metadata"]["name"]
-    return f"{namespace}/{name}"
-
-
-def log_hook(logger: logging.Logger, hook: WrappedFn) -> WrappedFn:
-    """
-    Decorates a kopf hook/function and logs when the hook is called
-    and when the hook succeeds/fails.
-
-    Will additionally log a resource's fully-qualfiied name if found.
-
-    Accepts a 'logger' that's ultimately used to log hook activity
-    """
-    if not inspect.iscoroutinefunction(hook):
-        raise NotImplementedError()
-
-    @functools.wraps(hook)
-    async def inner(*args, **kwargs):
-        hook_name = hook.__name__
-        if body := kwargs.get("body"):
-            hook_name = f"{hook_name}:{resource_fqn(body)}"
-
-        logger.info(f"{hook_name} started")
-        try:
-            rv = await hook(*args, **kwargs)
-            logger.info(f"{hook_name} completed")
-            return rv
-        except Exception as e:
-            if isinstance(e, kopf.TemporaryError):
-                logger.error(f"{hook_name} failed with retryable error: {e}")
-            elif isinstance(e, kopf.PermanentError):
-                logger.error(f"{hook_name} failed with non-retryable error: {e}")
-            raise e
-
-    return cast(WrappedFn, inner)
-
-
-HandleHookExceptionCallback = Callable[[Exception], None]
-
-
-def handle_hook_exception(
-    callback: HandleHookExceptionCallback,
-    hook: WrappedFn,
-) -> WrappedFn:
-    """
-    kopf will retry any hooks that fail with an exception - unless a
-    kopf.PermanentError is raised.
-
-    This method decorates a kopf event/hook function and wraps known errors
-    in `kopf.PermanentError` to prevent spurious retries.
-
-    Accepts a 'callback' that allows 'Operator' subclasses to further customize exception handling.
-    """
-    if not inspect.iscoroutinefunction(hook):
-        raise NotImplementedError()
-
-    @functools.wraps(hook)
-    async def inner(*args, **kwargs):
-        try:
-            return await hook(*args, **kwargs)
-        except OperatorError as e:
-            if e.recoverable:
-                raise kopf.TemporaryError(str(e)) from e
-            else:
-                raise kopf.PermanentError(str(e)) from e
-        except pydantic.ValidationError as e:
-            raise kopf.PermanentError(str(e)) from e
-        except Exception as e:
-            callback(e)
-            raise kopf.TemporaryError(str(e)) from e
-
-    return cast(WrappedFn, inner)
-
-
-RunSyncRV = TypeVar("RunSyncRV")
-
-
-async def run_sync(f: Callable[[], RunSyncRV]) -> RunSyncRV:
-    """
-    Convenience method to run sync functions within a thread pool executor
-    to avoid blocking the running asyncio event loop.
-    """
-    return await asyncio.get_running_loop().run_in_executor(None, f)
-
-
-class BaseModel(pydantic.BaseModel):
-    model_config = {"populate_by_name": True}
-
-    def model_dump(self, **kwargs):
-        """
-        pydantic's default `model_dump` method will produce a `dict` that (sometimes) cannot
-        be serialized via `json.dumps`.
-
-        This method avoids this shortcoming by dumping the model to a string and loading
-        the result via `json.loads`.
-        """
-        data_str = self.model_dump_json(**kwargs)
-        return json.loads(data_str)
-
-    def model_dump_json(self, **kwargs):
-        """
-        Calls the parent `model_dump_json` but sets different defaults.
-
-        Sets `by_alias` to True by default - the operator is often serializing
-        data to kubernetes in camelcase - represented by aliases in pydantic.
-        """
-        kwargs.setdefault("by_alias", True)
-        return super().model_dump_json(**kwargs)
-
-
-cluster_namespace: str = "__cluster__"
-
-
-class ResourceTypeRef(BaseModel):
-    """
-    A resource type ref refers to a resource type - useful primarily for list operations
+    Defines required metadata when creating a custom resource class
     """
 
-    api_version: str = pydantic.Field(..., alias=str("apiVersion"))
+    api_version: str
+    kind: str
     plural: str
-    namespace: str
-
-    @property
-    def is_namespaced(self) -> bool:
-        return self.namespace != cluster_namespace
 
 
-class ResourceRef(ResourceTypeRef):
+class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
     """
-    A resource ref refers to a resource reference - useful for resource-level kubernetes api interactions.
+    Provides custom fields and functionality between both GlobalResource and NamespacedResource classes.
     """
 
-    name: str
-
-    @property
-    def fqn(self) -> str:
-        value = f"{self.name}"
-        if self.is_namespaced:
-            value = f"{self.namespace}:{value}"
-        return value
-
-
-class ResourceKeyRef(ResourceRef):
-    """
-    A resource key ref refers to a key within a resource reference
-    """
-
-    key: str
-
-
-SomeModel = TypeVar("SomeModel", bound=BaseModel)
-
-
-def get_diff(a: SomeModel, b: SomeModel) -> kopf.Diff:
-    """
-    Helper method to return a diff between two models of the same class.
-    """
-    return kopf._cogs.structs.diffs.diff(a.model_dump(), b.model_dump())
-
-
-def apply_diff_item(model: SomeModel, item: kopf.DiffItem) -> SomeModel:
-    """
-    Applies a given diff item to an model - returning an updated
-    copy of the model.
-    """
-    data = model.model_dump()
-    operation, field, old_value, new_value = item
-    if operation == "change":
-        curr = data
-        # traverse object parent fields
-        for f in field[:-1]:
-            curr = data[f]
-        # set final field value
-        field = field[-1]
-        curr[field] = new_value
-    else:
-        raise NotImplementedError()
-    return type(model).model_validate(data)
-
-
-def filter_immutable_diff_items(
-    diff: kopf.Diff, immutable: set[tuple[str, ...]], kopf_logger: logging.Logger
-) -> Iterable[kopf.DiffItem]:
-    """
-    Most resources have fields that shouldn't change during updates - and will often
-    need to filter out diff items that attempt to modify existing fields.
-
-    This helper function will yield diff items that aren't part of the provided immutable
-    fields set.
-    """
-    for item in diff:
-        if item[1] in immutable:
-            kopf_logger.info(f"ignoring immutable field: {item[1]}")
-            continue
-        yield item
-
-
-class ServerConfig(uvicorn.Config):
-    """
-    Override of uvicorn.Config that disables default behavior.
-
-    - Prevents uvicorn from overriding logging configurations
-    """
-
-    def configure_logging(self) -> None:
-        """
-        This method is overridden to prevent uvicorn from overriding logging configurations
-        """
-        pass
-
-
-async def create_kube_client(
-    kube_config: pathlib.Path | None = None,
-) -> kubernetes.client.ApiClient:
-    """
-    Creates a kubernetes api client.
-
-    Will default to in-cluster configuration unless a kube config path is provided.
-    """
-    config = kubernetes.client.Configuration()
-    if kube_config:
-        kubernetes.config.load_kube_config(
-            config_file=f"{kube_config}", client_configuration=config
-        )
-    else:
-        kubernetes.config.load_incluster_config(client_configuration=config)
-    kube_client = kubernetes.client.ApiClient(config)
-    return kube_client
-
-
-def get_resource_type_url(resource_type_ref: ResourceTypeRef) -> str:
-    """
-    Gets a url given a resource type ref
-    """
-    api_version_parts = resource_type_ref.api_version.split("/")
-    if len(api_version_parts) == 1:
-        # core apis use the /api base
-        url = f"/api/{resource_type_ref.api_version}"
-    else:
-        # everything else uses the /apis base
-        url = f"/apis/{resource_type_ref.api_version}"
-
-    if resource_type_ref.is_namespaced:
-        url = f"{url}/namespaces/{resource_type_ref.namespace}"
-
-    url = f"{url}/{resource_type_ref.plural}"
-
-    return url
-
-
-def get_resource_url(resource_ref: ResourceRef) -> str:
-    """
-    Gets a url given a resource ref
-    """
-    resource_type_ref = ResourceTypeRef(
-        api_version=resource_ref.api_version,
-        plural=resource_ref.plural,
-        namespace=resource_ref.namespace,
+    apiVersion: str = ""
+    kind: str = ""
+    metadata: lightkube.models.meta_v1.ObjectMeta
+    spec: ResourceSpec
+    status: ResourceStatus[ResourceSpec] = pydantic.Field(
+        default_factory=lambda: ResourceStatus()
     )
-    return f"{get_resource_type_url(resource_type_ref)}/{resource_ref.name}"
 
+    # NOTE: required for lightkube
+    _api_info: ClassVar[lightkube.core.resource.ApiInfo] = cast(
+        lightkube.core.resource.ApiInfo, None
+    )
 
-async def get_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
-) -> dict | None:
-    """
-    Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
-    """
+    # operator-core specific internal fields
+    # NOTE: dunder attributes prevent pydantic from processing them
+    __oc_bases__: set[type] = set()
+    __oc_resource__: ResourceMeta = cast(ResourceMeta, None)
+    __oc_immutable_fields__: set[tuple[str]] = cast(set[tuple[str]], None)
 
-    def inner():
-        return cast(
-            urllib3.response.HTTPResponse,
-            kube_client.call_api(
-                get_resource_url(resource_ref),
-                "GET",
-                _return_http_data_only=True,
-                _preload_content=False,
-            ),
+    @classmethod
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        cls.__oc_bases__ = set(cls.__oc_bases__)
+        if len(cls.__oc_bases__) < 2:
+            # ignore base classes (NamespacedResource, GlobalResource)
+            # ignore pydantic anonymous subclasses (NamespacedResource[ServiceSpec], etc.)
+            cls.__oc_bases__.add(cls)
+            return
+
+        if cls.__oc_resource__ is None:
+            # resource *must* define metadata
+            raise TypeError(f"{cls} must set __oc_resource__ field")
+
+        # ensure immutable fields is a set (and not 'None')
+        # ensure every class has its own copy of the immutable fields set
+        immutable_fields = cls.__oc_immutable_fields__ or set()
+        cls.__oc_immutable_fields__ = set(immutable_fields)
+
+        api_version = cls.__oc_resource__["api_version"]
+        api_version_parts = api_version.split("/")
+        if len(api_version_parts) == 1:
+            api_version_parts = "", *api_version_parts
+        group, version = api_version_parts
+        kind = cls.__oc_resource__["kind"]
+        plural = cls.__oc_resource__["plural"]
+
+        # create required lightkube internal field
+        cls._api_info = lightkube.generic_resource.create_api_info(
+            group, version, kind, plural
         )
 
-    try:
-        response = await run_sync(inner)
-    except kubernetes.client.ApiException as e:
-        try:
-            data = json.loads(cast(Any, e.body).decode("utf-8"))
-            message = data["message"]
-        except Exception:
-            raise e
-        if f'"{resource_ref.name}" not found' not in message:
-            raise e
-        return None
+        # use metadata to set defaults for instance-level attributes
+        cls.model_fields["apiVersion"].default = api_version
+        cls.model_fields["kind"].default = kind
 
-    data = json.loads(response.data.decode("utf-8"))
-    return data
+        # register model with lightkube
+        lightkube.core.resource_registry.resource_registry.register(cast(Any, cls))
 
+    @classmethod
+    def from_dict(cls, v, **kwargs):
+        """
+        NOTE: required for lightkube
+        """
+        return cls.model_validate(v)
 
-async def list_resources(
-    kube_client: kubernetes.client.ApiClient, resource_type_ref: ResourceTypeRef
-) -> list[dict]:
-    """
-    Lists kubernetes resources
-    """
-
-    def inner():
-        return cast(
-            urllib3.response.HTTPResponse,
-            kube_client.call_api(
-                get_resource_type_url(resource_type_ref),
-                "GET",
-                _return_http_data_only=True,
-                _preload_content=False,
-            ),
-        )
-
-    response = await run_sync(inner)
-    data = json.loads(response.data.decode("utf-8"))
-    return data["items"]
+    def to_dict(self, **kwargs):
+        """
+        NOTE: required for lightkube
+        """
+        return self.model_dump()
 
 
-async def delete_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
+class NamespacedResource(
+    BaseResource[ResourceSpec], lightkube.core.resource.NamespacedResource
 ):
     """
-    Deletes a kubernetes resource
+    Convenience base-class for namespaced resources.
     """
 
-    def inner():
-        return cast(
-            urllib3.response.HTTPResponse,
-            kube_client.call_api(
-                get_resource_url(resource_ref),
-                "DELETE",
-                _return_http_data_only=True,
-                _preload_content=False,
-            ),
-        )
-
-    return await run_sync(inner)
+    pass
 
 
-async def create_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
+class GlobalResource(
+    BaseResource[ResourceSpec], lightkube.core.resource.GlobalResource
 ):
     """
-    Creates a new kubernetes resource
+    Convenience base-class for global resources.
     """
 
-    def inner():
-        return cast(
-            urllib3.response.HTTPResponse,
-            kube_client.call_api(
-                get_resource_url(resource_ref),
-                "POST",
-                body=body,
-                _return_http_data_only=True,
-                _preload_content=False,
-            ),
-        )
-
-    return await run_sync(inner)
+    pass
 
 
-async def update_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
-):
-    """
-    Replaces an existing kubernetes resource (performing an update).
-    """
-
-    def inner():
-        return cast(
-            urllib3.response.HTTPResponse,
-            kube_client.call_api(
-                get_resource_url(resource_ref),
-                "PUT",
-                body=body,
-                _return_http_data_only=True,
-                _preload_content=False,
-            ),
-        )
-
-    return await run_sync(inner)
+Resource = NamespacedResource | GlobalResource
+SomeResource = TypeVar("SomeResource", bound=Resource, contravariant=True)
 
 
-def get_resource_key(resource: dict, key: str) -> str:
-    """
-    Retrieves a key from a resource.
-    """
-    if resource["kind"] == "Secret":
-        data = resource["data"][key]
-        data = base64.b64decode(data).decode("utf-8")
-    elif resource["kind"] == "ConfigMap":
-        data = resource["data"][key]
-    else:
-        raise NotImplementedError(resource_fqn(resource))
-    return data
+class ResourceCallback(Protocol[SomeResource]):
+    async def __call__(
+        self, resource: SomeResource, *, logger: kopf.Logger
+    ) -> None: ...
 
 
 class Operator:
     """
-    Implements a kubernetes operator capable of syncing minio tenants and
-    a handful of custom resource definitions with a remote minio server.
+    Implements a base operator class on which concrete operators can be built.
     """
 
     # health fastapi instance
@@ -509,7 +187,7 @@ class Operator:
     # port used for health endpoint server
     health_port: int
     # a client capable of communcating with kubernetes
-    kube_client: kubernetes.client.ApiClient
+    kube_client: lightkube.core.async_client.AsyncClient
     # an (optional) path to a kubeconfig file
     kube_config: pathlib.Path | None
     # logger instance
@@ -528,32 +206,258 @@ class Operator:
     ):
         self.health_fastapi = fastapi.FastAPI()
         self.health_port = health_port or 8888
-        self.kube_client = cast(kubernetes.client.ApiClient, None)
+        self.kube_client = cast(lightkube.core.async_client.AsyncClient, None)
         self.kube_config = kube_config
         self.logger = logger
         self.ready_event = asyncio.Event()
         self.registry = kopf.OperatorRegistry()
 
-        # register operator hooks
-        for hook in iter_hooks(self):
-            kopf_decorator_fn = getattr(kopf.on, hook._hook_event)
-            kopf_decorator = kopf_decorator_fn(
-                *hook._hook_args, registry=self.registry, **hook._hook_kwargs
-            )
-            hook = handle_hook_exception(self.handle_exception, hook)
-            hook = log_hook(self.logger, hook)
-            kopf_decorator(hook)
+        on_login = self.wrap_with_event_context("login", self.login)
+        on_startup = self.wrap_with_event_context("startup", self.startup)
+        kopf.on.login(registry=self.registry)(cast(Any, on_login))
+        kopf.on.startup(registry=self.registry)(on_startup)
 
-        # register health endpoint
         self.health_fastapi.add_api_route("/healthz", self.health, methods=["GET"])
 
-    def handle_exception(self, exception: Exception):
+    def watch_resource(
+        self,
+        resource_cls: type[SomeResource],
+        sync_callback: ResourceCallback[SomeResource],
+        delete_callback: ResourceCallback[SomeResource],
+    ) -> None:
         """
-        Operator class hook for exception handling.
+        Watches the given resource class by registering event listeners
+        on several kubernetes resource events.
+        """
+        on_create = self.wrap_with_event_context(
+            "create",
+            functools.partial(
+                self.resource_create, resource_cls=resource_cls, callback=sync_callback
+            ),
+        )
+        on_update = self.wrap_with_event_context(
+            "update",
+            functools.partial(
+                self.resource_update, resource_cls=resource_cls, callback=sync_callback
+            ),
+        )
+        on_delete = self.wrap_with_event_context(
+            "delete",
+            functools.partial(
+                self.resource_delete,
+                resource_cls=resource_cls,
+                callback=delete_callback,
+            ),
+        )
 
-        (NOTE: see `handle_hook_exception`)
+        group = resource_cls._api_info.resource.group
+        version = resource_cls._api_info.resource.version
+        plural = resource_cls._api_info.plural
+
+        kopf.on.create(group, version, plural, registry=self.registry)(on_create)
+        kopf.on.update(group, version, plural, registry=self.registry)(on_update)
+        kopf.on.delete(group, version, plural, registry=self.registry)(on_delete)
+
+    @contextlib.asynccontextmanager
+    async def log_events(
+        self, event: str, body: kopf.Body | None = None
+    ) -> AsyncGenerator[None, None]:
         """
-        pass
+        A context that logs the start/finish of operator events.
+        """
+        event_name = event
+        if body:
+            namespace = body["metadata"].get("namespace", "<cluster>")
+            name = body["metadata"]["name"]
+            event_name = f"{event_name}:{namespace}/{name}"
+
+        try:
+            self.logger.info(f"{event_name} started")
+            yield
+            self.logger.info(f"{event_name} completed")
+        except Exception as e:
+            if isinstance(e, kopf.TemporaryError):
+                self.logger.error(f"{event_name} failed with retryable error: {e}")
+            elif isinstance(e, kopf.PermanentError):
+                self.logger.error(f"{event_name} failed with non-retryable error: {e}")
+            else:
+                # NOTE: assumes 'handle_event_exceptions' is called before this
+                raise NotImplementedError(e)
+            raise e
+
+    @contextlib.asynccontextmanager
+    async def handle_event_exceptions(self) -> AsyncGenerator[None, None]:
+        """
+        A context that catches, processes and re-raises processed exceptions
+        """
+        try:
+            yield
+        except Exception as base_exception:
+            exception = self.wrap_exception(base_exception)
+            raise exception from base_exception
+
+    def wrap_with_event_context(
+        self, event: str, callback: Callable[..., Coroutine[Any, Any, Any]]
+    ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        """
+        Wraps an operator event handler in a sequence of general contexts (e.g., error handling, logging)
+        """
+
+        signature = inspect.signature(callback)
+
+        @functools.wraps(callback)
+        async def inner(*args, **kwargs):
+            async with contextlib.AsyncExitStack() as exit_stack:
+                body = kwargs.get("body")
+                await exit_stack.enter_async_context(self.log_events(event, body=body))
+                await exit_stack.enter_async_context(self.handle_event_exceptions())
+                _kwargs = {}
+                for key in signature.parameters.keys():
+                    if key not in kwargs:
+                        continue
+                    _kwargs[key] = kwargs[key]
+                return await callback(**_kwargs)
+
+        return inner
+
+    async def login(self):
+        """
+        Authenticates the operator with kubernetes
+        """
+        if self.kube_config:
+            self.logger.debug(f"kopf login using kubeconfig: {self.kube_config}")
+            env = os.environ
+            try:
+                os.environ = dict(os.environ)
+                os.environ["KUBECONFIG"] = f"{self.kube_config}"
+                return kopf.login_with_kubeconfig()
+            finally:
+                os.environ = env
+        else:
+            self.logger.debug(f"kopf login using in-cluster")
+            return kopf.login_with_service_account()
+
+    async def startup(self):
+        """
+        Initializes the operator
+        """
+        kube_config = None
+        if self.kube_config:
+            kube_config = lightkube.config.kubeconfig.KubeConfig.from_file(
+                self.kube_config
+            )
+        # TODO: remove when https://github.com/gtsystem/lightkube/pull/67 is published
+        kube_config = cast(lightkube.config.kubeconfig.KubeConfig, kube_config)
+        self.kube_client = lightkube.core.async_client.AsyncClient(kube_config)
+
+    async def resource_create(
+        self,
+        *,
+        resource_cls: type[SomeResource],
+        callback: ResourceCallback[SomeResource],
+        body: kopf.Body,
+        patch: kopf.Patch,
+        logger: kopf.Logger,
+    ):
+        """
+        Called when a watched kubernetes resource is created
+        """
+        model = resource_cls.model_validate(dict(body))
+        await callback(model, logger=logger)
+        patch.status["currentSpec"] = model.to_dict()["spec"]
+
+    def apply_diff_item(self, data: dict, diff_item: kopf.DiffItem):
+        """
+        Applies a diff item to the data object.
+
+        Used during `resource_update` to incrementally update a resource.
+        """
+        new_data = dict(data)
+        operation, field, old_value, new_value = diff_item
+        if operation == "change":
+            curr = new_data
+            # traverse object parent fields
+            for f in field[:-1]:
+                curr = data[f]
+            # set final field value
+            field = field[-1]
+            curr[field] = new_value
+        else:
+            raise NotImplementedError()
+        return new_data
+
+    async def resource_update(
+        self,
+        *,
+        resource_cls: type[SomeResource],
+        callback: ResourceCallback[SomeResource],
+        body: kopf.Body,
+        patch: kopf.Patch,
+        logger: kopf.Logger,
+    ):
+        """
+        Called when a watched kubernetes resource is updated
+        """
+        if body["status"].get("currentSpec") is None:
+            # retry resoure creation if previous attempts have failed
+            return await self.resource_create(
+                resource_cls=resource_cls,
+                callback=callback,
+                body=body,
+                logger=logger,
+                patch=patch,
+            )
+
+        # calculate the diff between the desired spec and the current spec
+        current = dict(body["status"]["currentSpec"])
+        desired = dict(body["spec"])
+        diff_items = kopf._cogs.structs.diffs.diff(current, desired)
+
+        # incrementally update the resource
+        for diff_item in diff_items:
+            if diff_item[1] in resource_cls.__oc_immutable_fields__:
+                # do not attempt to mutate immutable fields
+                logger.info(f"ignoring immutable field: {diff_item[1]}")
+                continue
+            # apply diff item to create an updated model
+            current = self.apply_diff_item(current, diff_item)
+            data = dict(body)
+            data.update({"spec": current})
+            model = resource_cls.model_validate(data)
+            # perform the update
+            await callback(model, logger=logger)
+            # update status if update successful
+            patch.status["currentSpec"] = current
+
+    async def resource_delete(
+        self,
+        *,
+        resource_cls: type[SomeResource],
+        callback: ResourceCallback[SomeResource],
+        body: kopf.Body,
+        logger: kopf.Logger,
+    ):
+        """
+        Called when a watched kubernetes resource is deleted
+        """
+        model = resource_cls.model_validate(dict(body))
+        await callback(model, logger=logger)
+
+    def wrap_exception(
+        self, exception: Exception
+    ) -> kopf.TemporaryError | kopf.PermanentError:
+        """
+        Wraps an exception in either a kopf.TemporaryError or kopf.PermamentError and returns it
+
+        NOTE: See `handle
+        """
+        wrapped_exception = kopf.TemporaryError(str(exception))
+        if isinstance(exception, OperatorError):
+            if not exception.recoverable:
+                wrapped_exception = kopf.PermanentError(str(exception))
+        elif isinstance(exception, pydantic.ValidationError):
+            wrapped_exception = kopf.PermanentError(str(exception))
+        return wrapped_exception
 
     async def health(self, response: fastapi.Response) -> fastapi.Response:
         """
@@ -572,102 +476,15 @@ class Operator:
 
         return response
 
-    def get_resource_type_url(self, resource_type_ref: ResourceTypeRef) -> str:
-        """
-        Gets a url given a resource type ref
-        """
-        return get_resource_type_url(resource_type_ref)
-
-    def get_resource_url(self, resource_ref: ResourceRef) -> str:
-        """
-        Gets a url given a resource ref
-        """
-        return get_resource_url(resource_ref)
-
-    async def get_resource(self, resource_ref: ResourceRef) -> dict | None:
-        """
-        Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
-        """
-        return await get_resource(self.kube_client, resource_ref)
-
-    async def list_resources(self, resource_type_ref: ResourceTypeRef) -> list[dict]:
-        """
-        Lists kubernetes resources
-        """
-
-        return await list_resources(self.kube_client, resource_type_ref)
-
-    async def delete_resource(self, resource_ref: ResourceRef):
-        """
-        Deletes a kubernetes resource
-        """
-        return await delete_resource(self.kube_client, resource_ref)
-
-    async def create_resource(self, resource_ref: ResourceRef, body: dict):
-        """
-        Creates a new kubernetes resource
-        """
-
-        return await create_resource(self.kube_client, resource_ref, body)
-
-    async def update_resource(self, resource_ref: ResourceRef, body: dict):
-        """
-        Replaces an existing kubernetes resource (performing an update).
-        """
-
-        return await update_resource(self.kube_client, resource_ref, body)
-
-    async def create_owner_reference(self, resource_ref: ResourceRef) -> dict:
-        """
-        Creates an owner reference for the given resource ref.
-
-        NOTE: Calls `get_resource` from the kubernetes api
-        """
-        resource = await self.get_resource(resource_ref)
-        if resource is None:
-            raise ValueError(f"unable to get resource: {resource_ref.fqn}")
-        return {
-            "apiVersion": resource["apiVersion"],
-            "kind": resource["kind"],
-            "name": resource["metadata"]["name"],
-            "uid": resource["metadata"]["uid"],
-        }
-
-    def get_resource_key(self, resource: dict, key: str) -> str:
-        """
-        Retrieves a key from a resource.
-        """
-        return get_resource_key(resource, key)
-
-    @hook("startup")
-    async def startup(self, **kwargs):
-        """
-        Initializes the operator
-        """
-        self.kube_client = await create_kube_client(self.kube_config)
-
-    @hook("login")
-    async def login(self, **kwargs):
-        """
-        Authenticates the operator with kubernetes
-        """
-        if self.kube_config:
-            self.logger.debug(f"kopf login using kubeconfig: {self.kube_config}")
-            env = os.environ
-            try:
-                os.environ = dict(os.environ)
-                os.environ["KUBECONFIG"] = f"{self.kube_config}"
-                return kopf.login_with_kubeconfig()
-            finally:
-                os.environ = env
-        else:
-            self.logger.debug(f"kopf login using in-cluster")
-            return kopf.login_with_service_account()
-
     async def run(self):
         """
         Runs the operator - and blocks until exit.
         """
+
+        class ServerConfig(uvicorn.Config):
+            def configure_logging(self) -> None:
+                pass
+
         # create healthcheck server
         server = uvicorn.Server(
             ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
@@ -682,22 +499,8 @@ class Operator:
 
 
 __all__ = [
-    "get_diff",
-    "apply_diff_item",
-    "filter_immutable_diff_items",
-    "create_kube_client",
-    "create_resource",
-    "delete_resource",
-    "list_resources",
-    "update_resource",
-    "hook",
-    "resource_namespace",
-    "resource_fqn",
-    "run_sync",
-    "BaseModel",
+    "GlobalResource",
+    "NamespacedResource",
     "OperatorError",
-    "cluster_namespace",
-    "ResourceRef",
-    "ResourceKeyRef",
     "Operator",
 ]

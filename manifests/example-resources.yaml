@@ -1,0 +1,15 @@
+apiVersion: bfiola.dev/v1
+kind: Namespaced
+metadata:
+  name: namespaced
+spec:
+  mutable: mutable
+  immutable: immutable
+---
+apiVersion: bfiola.dev/v1
+kind: Global
+metadata:
+  name: global
+spec:
+  mutable: mutable
+  immutable: immutable
