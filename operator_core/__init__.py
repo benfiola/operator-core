@@ -112,9 +112,7 @@ def iter_hooks(obj: object) -> Iterable[HookFn]:
         if hook_fn != val:
             # instance method not decorated with @hook, parent method was
             # call @hook on instance method  using parent method data
-            hook_fn = hook(
-                hook_fn._hook_event, *hook_fn._hook_args, **hook_fn._hook_kwargs
-            )(val)
+            hook_fn = hook(hook_fn._hook_event, *hook_fn._hook_args, **hook_fn._hook_kwargs)(val)
 
         yield hook_fn
 
@@ -356,9 +354,7 @@ async def create_kube_client(
     """
     config = kubernetes.client.Configuration()
     if kube_config:
-        kubernetes.config.load_kube_config(
-            config_file=f"{kube_config}", client_configuration=config
-        )
+        kubernetes.config.load_kube_config(config_file=f"{kube_config}", client_configuration=config)
     else:
         kubernetes.config.load_incluster_config(client_configuration=config)
     kube_client = kubernetes.client.ApiClient(config)
@@ -397,9 +393,7 @@ def get_resource_url(resource_ref: ResourceRef) -> str:
     return f"{get_resource_type_url(resource_type_ref)}/{resource_ref.name}"
 
 
-async def get_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
-) -> dict | None:
+async def get_resource(kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef) -> dict | None:
     """
     Gets a kubernetes resource.  Returns 'None' if the resource does not exist.
     """
@@ -431,9 +425,7 @@ async def get_resource(
     return data
 
 
-async def list_resources(
-    kube_client: kubernetes.client.ApiClient, resource_type_ref: ResourceTypeRef
-) -> list[dict]:
+async def list_resources(kube_client: kubernetes.client.ApiClient, resource_type_ref: ResourceTypeRef) -> list[dict]:
     """
     Lists kubernetes resources
     """
@@ -454,9 +446,7 @@ async def list_resources(
     return data["items"]
 
 
-async def delete_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef
-):
+async def delete_resource(kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef):
     """
     Deletes a kubernetes resource
     """
@@ -475,9 +465,7 @@ async def delete_resource(
     return await run_sync(inner)
 
 
-async def create_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
-):
+async def create_resource(kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict):
     """
     Creates a new kubernetes resource
     """
@@ -497,9 +485,7 @@ async def create_resource(
     return await run_sync(inner)
 
 
-async def update_resource(
-    kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict
-):
+async def update_resource(kube_client: kubernetes.client.ApiClient, resource_ref: ResourceRef, body: dict):
     """
     Replaces an existing kubernetes resource (performing an update).
     """
@@ -572,9 +558,7 @@ class Operator:
         # register operator hooks
         for hook in iter_hooks(self):
             kopf_decorator_fn = getattr(kopf.on, hook._hook_event)
-            kopf_decorator = kopf_decorator_fn(
-                *hook._hook_args, registry=self.registry, **hook._hook_kwargs
-            )
+            kopf_decorator = kopf_decorator_fn(*hook._hook_args, registry=self.registry, **hook._hook_kwargs)
             hook = handle_hook_exception(self.handle_exception, hook)
             hook = log_hook(self.logger, hook)
             kopf_decorator(hook)
@@ -704,14 +688,10 @@ class Operator:
         Runs the operator - and blocks until exit.
         """
         # create healthcheck server
-        server = uvicorn.Server(
-            ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
-        )
+        server = uvicorn.Server(ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port))
 
         await asyncio.gather(
-            kopf.operator(
-                clusterwide=True, ready_flag=self.ready_event, registry=self.registry
-            ),
+            kopf.operator(clusterwide=True, ready_flag=self.ready_event, registry=self.registry),
             server._serve(),
         )
 

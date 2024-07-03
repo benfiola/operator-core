@@ -12,9 +12,7 @@ class TestOperator(Operator):
 
 
 async def main():
-    operator = TestOperator(
-        kube_config=pathlib.Path("/root/.kube/config"), logger=logger
-    )
+    operator = TestOperator(kube_config=pathlib.Path("/root/.kube/config"), logger=logger)
     await operator.run()
 
 
