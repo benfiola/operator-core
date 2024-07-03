@@ -58,10 +58,10 @@ def hook(event: str, *args, **kwargs):
             # only support async functions
             raise NotImplementedError()
 
-        setattr(f, "_hook_fn", True)
-        setattr(f, "_hook_event", event)
-        setattr(f, "_hook_args", args)
-        setattr(f, "_hook_kwargs", kwargs)
+        f.__dict__["_hook_fn"] = True
+        f.__dict__["_hook_event"] = event
+        f.__dict__["_hook_args"] = args
+        f.__dict__["_hook_kwargs"] = kwargs
 
         return cast(HookFn[WrappedFn], f)
 
@@ -74,14 +74,49 @@ def iter_hooks(obj: object) -> Iterable[HookFn]:
     """
     for attr in dir(obj):
         val = getattr(obj, attr)
-        if not callable(val):
+        if not inspect.ismethod(val):
+            # attr is *not* a bound method
             continue
-        if not hasattr(val, "__dict__"):
+
+        # search class hierarchy for *any* method wrapped with @hook
+        # NOTE: this prevents subclasses from having to re-decorate overridden methods
+        hook_fn: HookFn | None = None
+        classes = [obj.__class__]
+        while classes:
+            cls = classes.pop()
+            if cls == object:
+                # prevent infinite loop (object.__bases__ == [object])
+                continue
+
+            # get unbound method for current class
+            unbound_method = getattr(cls, attr, None)
+            if not unbound_method:
+                # continue search - current class does not implement method
+                continue
+            # bind the unbound method to obj
+            method = unbound_method.__get__(obj)
+            if not getattr(method, "_hook_fn", False):
+                # continue search - current method not decorated with @hook
+                classes.extend(cls.__bases__)
+                continue
+
+            # stop search - @hook decorated bound method found
+            method = cast(HookFn, method)
+            hook_fn = method
+            break
+
+        if not hook_fn:
+            # ignore attr - @hook decorated method not found in entire class hierarchy
             continue
-        if "_hook_fn" not in val.__dict__:
-            continue
-        val = cast(HookFn, val)
-        yield val
+
+        if hook_fn != val:
+            # instance method not decorated with @hook, parent method was
+            # call @hook on instance method  using parent method data
+            hook_fn = hook(
+                hook_fn._hook_event, *hook_fn._hook_args, **hook_fn._hook_kwargs
+            )(val)
+
+        yield hook_fn
 
 
 def resource_namespace(resource: dict | kopf.Body) -> str:
