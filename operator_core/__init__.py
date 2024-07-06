@@ -210,37 +210,41 @@ class Operator:
     def watch_resource(
         self,
         resource_cls: type[SomeResource],
-        sync_callback: ResourceCallback[SomeResource],
-        delete_callback: ResourceCallback[SomeResource],
+        *,
+        on_create: ResourceCallback[SomeResource] | None = None,
+        on_update: ResourceCallback[SomeResource] | None = None,
+        on_delete: ResourceCallback[SomeResource] | None = None,
     ) -> None:
         """
         Watches the given resource class by registering event listeners
         on several kubernetes resource events.
         """
-        on_create = self.wrap_with_event_context(
-            "create",
-            functools.partial(self.resource_create, resource_cls=resource_cls, callback=sync_callback),
-        )
-        on_update = self.wrap_with_event_context(
-            "update",
-            functools.partial(self.resource_update, resource_cls=resource_cls, callback=sync_callback),
-        )
-        on_delete = self.wrap_with_event_context(
-            "delete",
-            functools.partial(
-                self.resource_delete,
-                resource_cls=resource_cls,
-                callback=delete_callback,
-            ),
-        )
-
         group = resource_cls._api_info.resource.group
         version = resource_cls._api_info.resource.version
         plural = resource_cls._api_info.plural
 
-        kopf.on.create(group, version, plural, registry=self.registry)(on_create)
-        kopf.on.update(group, version, plural, registry=self.registry)(on_update)
-        kopf.on.delete(group, version, plural, registry=self.registry)(on_delete)
+        if on_create:
+            _on_create = self.wrap_with_event_context(
+                "create",
+                functools.partial(self.resource_create, resource_cls=resource_cls, callback=on_create),
+            )
+            kopf.on.create(group, version, plural, registry=self.registry)(_on_create)
+        if on_update:
+            _on_update = self.wrap_with_event_context(
+                "update",
+                functools.partial(self.resource_update, resource_cls=resource_cls, callback=on_update),
+            )
+            kopf.on.update(group, version, plural, registry=self.registry)(_on_update)
+        if on_delete:
+            _on_delete = self.wrap_with_event_context(
+                "delete",
+                functools.partial(
+                    self.resource_delete,
+                    resource_cls=resource_cls,
+                    callback=on_delete,
+                ),
+            )
+            kopf.on.delete(group, version, plural, registry=self.registry)(_on_delete)
 
     @contextlib.asynccontextmanager
     async def log_events(self, event: str, body: kopf.Body | None = None) -> AsyncGenerator[None, None]:
