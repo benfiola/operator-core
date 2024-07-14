@@ -425,7 +425,13 @@ class Operator:
         Called when a watched kubernetes resource is deleted
         """
         model = resource_cls.model_validate(dict(body))
-        await callback(model, logger=logger)
+        try:
+            await callback(model, logger=logger)
+        except OperatorError as e:
+            if e.recoverable is True:
+                raise e
+            # unblock resource deletion if error is non-recoverable
+            logger.exception(f"ignoring non-recoverable error", exc_info=e)
 
     def wrap_exception(self, exception: Exception) -> kopf.TemporaryError | kopf.PermanentError:
         """
