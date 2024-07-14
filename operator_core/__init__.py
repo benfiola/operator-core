@@ -424,7 +424,15 @@ class Operator:
         """
         Called when a watched kubernetes resource is deleted
         """
-        model = resource_cls.model_validate(dict(body))
+        if body["status"].get("currentSpec") is None:
+            return
+
+        # build and validate resource with current spec
+        current_spec = dict(body["status"]["currentSpec"])
+        data = dict(body)
+        data.update({"spec": current_spec})
+        model = resource_cls.model_validate(data)
+
         try:
             await callback(model, logger=logger)
         except OperatorError as e:
