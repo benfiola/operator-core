@@ -12,7 +12,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "bfiola-devtools"
+    "black",
+    "build",
+    "twine"
 ]
 
 [tool.setuptools.packages.find]

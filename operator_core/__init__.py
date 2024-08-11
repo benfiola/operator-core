@@ -78,10 +78,14 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
     kind: str = ""
     metadata: lightkube.models.meta_v1.ObjectMeta
     spec: ResourceSpec
-    status: ResourceStatus[ResourceSpec] = pydantic.Field(default_factory=lambda: ResourceStatus())
+    status: ResourceStatus[ResourceSpec] = pydantic.Field(
+        default_factory=lambda: ResourceStatus()
+    )
 
     # NOTE: required for lightkube
-    _api_info: ClassVar[lightkube.core.resource.ApiInfo] = cast(lightkube.core.resource.ApiInfo, None)
+    _api_info: ClassVar[lightkube.core.resource.ApiInfo] = cast(
+        lightkube.core.resource.ApiInfo, None
+    )
 
     # operator-core specific internal fields
     # NOTE: dunder attributes prevent pydantic from processing them
@@ -118,7 +122,9 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
         plural = cls.__oc_resource__["plural"]
 
         # create required lightkube internal field
-        cls._api_info = lightkube.generic_resource.create_api_info(group, version, kind, plural)
+        cls._api_info = lightkube.generic_resource.create_api_info(
+            group, version, kind, plural
+        )
 
         # use metadata to set defaults for instance-level attributes
         cls.model_fields["apiVersion"].default = api_version
@@ -141,7 +147,9 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
         return self.model_dump()
 
 
-class NamespacedResource(BaseResource[ResourceSpec], lightkube.core.resource.NamespacedResource):
+class NamespacedResource(
+    BaseResource[ResourceSpec], lightkube.core.resource.NamespacedResource
+):
     """
     Convenience base-class for namespaced resources.
     """
@@ -149,7 +157,9 @@ class NamespacedResource(BaseResource[ResourceSpec], lightkube.core.resource.Nam
     pass
 
 
-class GlobalResource(BaseResource[ResourceSpec], lightkube.core.resource.GlobalResource):
+class GlobalResource(
+    BaseResource[ResourceSpec], lightkube.core.resource.GlobalResource
+):
     """
     Convenience base-class for global resources.
     """
@@ -162,7 +172,9 @@ SomeResource = TypeVar("SomeResource", bound=Resource, contravariant=True)
 
 
 class ResourceCallback(Protocol[SomeResource]):
-    async def __call__(self, resource: SomeResource, *, logger: kopf.Logger) -> None: ...
+    async def __call__(
+        self, resource: SomeResource, *, logger: kopf.Logger
+    ) -> None: ...
 
 
 class Operator:
@@ -226,13 +238,17 @@ class Operator:
         if on_create:
             _on_create = self.wrap_with_event_context(
                 "create",
-                functools.partial(self.resource_create, resource_cls=resource_cls, callback=on_create),
+                functools.partial(
+                    self.resource_create, resource_cls=resource_cls, callback=on_create
+                ),
             )
             kopf.on.create(group, version, plural, registry=self.registry)(_on_create)
         if on_update:
             _on_update = self.wrap_with_event_context(
                 "update",
-                functools.partial(self.resource_update, resource_cls=resource_cls, callback=on_update),
+                functools.partial(
+                    self.resource_update, resource_cls=resource_cls, callback=on_update
+                ),
             )
             kopf.on.update(group, version, plural, registry=self.registry)(_on_update)
         if on_delete:
@@ -247,7 +263,9 @@ class Operator:
             kopf.on.delete(group, version, plural, registry=self.registry)(_on_delete)
 
     @contextlib.asynccontextmanager
-    async def log_events(self, event: str, body: kopf.Body | None = None) -> AsyncGenerator[None, None]:
+    async def log_events(
+        self, event: str, body: kopf.Body | None = None
+    ) -> AsyncGenerator[None, None]:
         """
         A context that logs the start/finish of operator events.
         """
@@ -329,7 +347,9 @@ class Operator:
         """
         kube_config = None
         if self.kube_config:
-            kube_config = lightkube.config.kubeconfig.KubeConfig.from_file(self.kube_config)
+            kube_config = lightkube.config.kubeconfig.KubeConfig.from_file(
+                self.kube_config
+            )
         # TODO: remove when https://github.com/gtsystem/lightkube/pull/67 is published
         kube_config = cast(lightkube.config.kubeconfig.KubeConfig, kube_config)
         self.kube_client = lightkube.core.async_client.AsyncClient(kube_config)
@@ -441,7 +461,9 @@ class Operator:
             # unblock resource deletion if error is non-recoverable
             logger.exception(f"ignoring non-recoverable error", exc_info=e)
 
-    def wrap_exception(self, exception: Exception) -> kopf.TemporaryError | kopf.PermanentError:
+    def wrap_exception(
+        self, exception: Exception
+    ) -> kopf.TemporaryError | kopf.PermanentError:
         """
         Wraps an exception in either a kopf.TemporaryError or kopf.PermamentError and returns it
 
@@ -482,10 +504,14 @@ class Operator:
                 pass
 
         # create healthcheck server
-        server = uvicorn.Server(ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port))
+        server = uvicorn.Server(
+            ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
+        )
 
         await asyncio.gather(
-            kopf.operator(clusterwide=True, ready_flag=self.ready_event, registry=self.registry),
+            kopf.operator(
+                clusterwide=True, ready_flag=self.ready_event, registry=self.registry
+            ),
             server._serve(),
         )
 
