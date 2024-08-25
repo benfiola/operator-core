@@ -48,10 +48,47 @@ class OperatorError(Exception):
         self.recoverable = recoverable
 
 
-ResourceSpec = TypeVar("ResourceSpec")
+class BaseModel(pydantic.BaseModel):
+    """
+    Intended to be used as a base model for all operator resource models (including spec classes).
+
+    Defines common behaviors:
+    - Sets an alias generator that accepts camelcased fields (as is often the case with data presented from the kubernetes API)
+    - Allows assignment by both alias and attribute name (in the event that a field is assigned via snake case)
+    - Overwrites `model_dump` and `model_dump_json` to serialize data using camel-cased alias
+    """
+
+    # set pydantic base model settings
+    # NOTE: 'alias_generator' automatically sets all snake_cased attributes to have a camel cased attribute (as is the standard with kubernetes resources)
+    # NOTE: 'populate_by_name' allows setting of attributes by both alias and attribute name
+    model_config = {
+        "alias_generator": pydantic.alias_generators.to_camel,
+        "populate_by_name": True,
+    }
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """
+        Calls `pydantic.BaseModel.model_dump` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        """
+        Calls `pydantic.BaseModel.model_dump_json` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump_json(**kwargs)
 
 
-class ResourceStatus(pydantic.BaseModel, Generic[ResourceSpec]):
+ResourceSpec = TypeVar("ResourceSpec", bound=BaseModel)
+
+
+class ResourceStatus(BaseModel, Generic[ResourceSpec]):
     """
     A generic data container for resource statuses.
     """
@@ -70,7 +107,7 @@ class ResourceMeta(TypedDict):
     plural: str
 
 
-class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
+class BaseResource(BaseModel, Generic[ResourceSpec]):
     """
     Provides custom fields and functionality between both GlobalResource and NamespacedResource classes.
     """
@@ -93,14 +130,6 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
     __oc_bases__: set[type] = set()
     __oc_resource__: ResourceMeta = cast(ResourceMeta, None)
     __oc_immutable_fields__: set[tuple[str]] = cast(set[tuple[str]], None)
-
-    # set pydantic base model settings
-    # NOTE: 'alias_generator' automatically sets all snake_cased attributes to have a camel cased attribute (as is the standard with kubernetes resources)
-    # NOTE: 'populate_by_name' allows setting of attributes by both alias and attribute name
-    model_config = {
-        "alias_generator": pydantic.alias_generators.to_camel,
-        "populate_by_name": True,
-    }
 
     @classmethod
     def __init_subclass__(cls, **kwargs):
@@ -154,24 +183,6 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
         NOTE: required for lightkube
         """
         return self.model_dump()
-
-    def model_dump(self, **kwargs) -> dict[str, Any]:
-        """
-        Calls `pydantic.BaseModel.model_dump` but sets different defaults.
-
-        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
-        """
-        kwargs.setdefault("by_alias", True)
-        return super().model_dump(**kwargs)
-
-    def model_dump_json(self, **kwargs) -> str:
-        """
-        Calls `pydantic.BaseModel.model_dump_json` but sets different defaults.
-
-        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
-        """
-        kwargs.setdefault("by_alias", True)
-        return super().model_dump_json(**kwargs)
 
 
 class NamespacedResource(
@@ -544,6 +555,7 @@ class Operator:
 
 
 __all__ = [
+    "BaseModel",
     "GlobalResource",
     "NamespacedResource",
     "OperatorError",
