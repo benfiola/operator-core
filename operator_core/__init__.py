@@ -28,6 +28,7 @@ import lightkube.core.resource_registry
 import lightkube.generic_resource
 import lightkube.models.meta_v1
 import pydantic
+import pydantic.alias_generators
 import uvicorn
 
 
@@ -93,6 +94,14 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
     __oc_resource__: ResourceMeta = cast(ResourceMeta, None)
     __oc_immutable_fields__: set[tuple[str]] = cast(set[tuple[str]], None)
 
+    # set pydantic base model settings
+    # NOTE: 'alias_generator' automatically sets all snake_cased attributes to have a camel cased attribute (as is the standard with kubernetes resources)
+    # NOTE: 'populate_by_name' allows setting of attributes by both alias and attribute name
+    model_config = {
+        "alias_generator": pydantic.alias_generators.to_camel,
+        "populate_by_name": True,
+    }
+
     @classmethod
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -146,6 +155,24 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
         """
         return self.model_dump()
 
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """
+        Calls `pydantic.BaseModel.model_dump` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        """
+        Calls `pydantic.BaseModel.model_dump_json` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump_json(**kwargs)
+
 
 class NamespacedResource(
     BaseResource[ResourceSpec], lightkube.core.resource.NamespacedResource
@@ -182,10 +209,10 @@ class Operator:
     Implements a base operator class on which concrete operators can be built.
     """
 
-    # health fastapi instance
-    health_fastapi: fastapi.FastAPI
-    # port used for health endpoint server
-    health_port: int
+    # fastapi instance
+    api: fastapi.FastAPI
+    # port used for fastapi instance
+    api_port: int
     # a client capable of communcating with kubernetes
     kube_client: lightkube.core.async_client.AsyncClient
     # an (optional) path to a kubeconfig file
@@ -200,12 +227,12 @@ class Operator:
     def __init__(
         self,
         *,
-        health_port: int | None = None,
+        api_port: int | None = None,
         kube_config: pathlib.Path | None = None,
         logger: logging.Logger,
     ):
-        self.health_fastapi = fastapi.FastAPI()
-        self.health_port = health_port or 8888
+        self.api = fastapi.FastAPI()
+        self.api_port = api_port or 8888
         self.kube_client = cast(lightkube.core.async_client.AsyncClient, None)
         self.kube_config = kube_config
         self.logger = logger
@@ -217,7 +244,7 @@ class Operator:
         kopf.on.login(registry=self.registry)(cast(Any, on_login))
         kopf.on.startup(registry=self.registry)(on_startup)
 
-        self.health_fastapi.add_api_route("/healthz", self.health, methods=["GET"])
+        self.api.add_api_route("/healthz", self.health, methods=["GET"])
 
     def watch_resource(
         self,
@@ -505,7 +532,7 @@ class Operator:
 
         # create healthcheck server
         server = uvicorn.Server(
-            ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
+            ServerConfig(app=self.api, host="0.0.0.0", port=self.api_port)
         )
 
         await asyncio.gather(
