@@ -2,13 +2,12 @@ import asyncio
 import logging
 import pathlib
 
-import pydantic
-from operator_core import NamespacedResource, Operator
+from operator_core import BaseModel, NamespacedResource, Operator
 
 logger = logging.getLogger(__name__)
 
 
-class TestSpec(pydantic.BaseModel):
+class TestSpec(BaseModel):
     mutable: str
     immutable: str
 
@@ -35,8 +34,12 @@ class TestOperator(Operator):
     def __init__(self, **kwargs):
         kwargs["logger"] = logger
         super().__init__(**kwargs)
-        self.watch_resource(Namespaced, self.sync, self.delete)
-        self.watch_resource(Global, self.sync, self.delete)
+        self.watch_resource(
+            Namespaced, on_create=self.sync, on_update=self.sync, on_delete=self.delete
+        )
+        self.watch_resource(
+            Global, on_create=self.sync, on_update=self.sync, on_delete=self.delete
+        )
 
     async def sync(self, resource: Namespaced | Global, **kwargs):
         pass

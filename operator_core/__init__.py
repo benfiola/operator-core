@@ -28,6 +28,7 @@ import lightkube.core.resource_registry
 import lightkube.generic_resource
 import lightkube.models.meta_v1
 import pydantic
+import pydantic.alias_generators
 import uvicorn
 
 
@@ -47,16 +48,54 @@ class OperatorError(Exception):
         self.recoverable = recoverable
 
 
-ResourceSpec = TypeVar("ResourceSpec")
+class BaseModel(pydantic.BaseModel):
+    """
+    Intended to be used as a base model for all operator resource models (including spec classes).
+
+    Defines common behaviors:
+    - Sets an alias generator that accepts camelcased fields (as is often the case with data presented from the kubernetes API)
+    - Allows assignment by both alias and attribute name (in the event that a field is assigned via snake case)
+    - Overwrites `model_dump` and `model_dump_json` to serialize data using camel-cased alias
+    """
+
+    # set pydantic base model settings
+    # NOTE: 'alias_generator' automatically sets all snake_cased attributes to have a camel cased attribute (as is the standard with kubernetes resources)
+    # NOTE: 'populate_by_name' allows setting of attributes by both alias and attribute name
+    model_config = {
+        "alias_generator": pydantic.alias_generators.to_camel,
+        "populate_by_name": True,
+    }
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """
+        Calls `pydantic.BaseModel.model_dump` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        """
+        Calls `pydantic.BaseModel.model_dump_json` but sets different defaults.
+
+        NOTE: Sets 'by_alias' to True to serialize attributes to camel case by default
+        """
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump_json(**kwargs)
 
 
-class ResourceStatus(pydantic.BaseModel, Generic[ResourceSpec]):
+ResourceSpec = TypeVar("ResourceSpec", bound=BaseModel)
+
+
+class ResourceStatus(BaseModel, Generic[ResourceSpec]):
     """
     A generic data container for resource statuses.
     """
 
     # the currently applied spec for the resource (can differ from the resource 'spec' when an invalid edit is made)
-    currentSpec: ResourceSpec | None = None
+    current_spec: ResourceSpec | None = None
+    synced: bool = False
 
 
 class ResourceMeta(TypedDict):
@@ -69,12 +108,12 @@ class ResourceMeta(TypedDict):
     plural: str
 
 
-class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
+class BaseResource(BaseModel, Generic[ResourceSpec]):
     """
     Provides custom fields and functionality between both GlobalResource and NamespacedResource classes.
     """
 
-    apiVersion: str = ""
+    api_version: str = ""
     kind: str = ""
     metadata: lightkube.models.meta_v1.ObjectMeta
     spec: ResourceSpec
@@ -127,7 +166,7 @@ class BaseResource(pydantic.BaseModel, Generic[ResourceSpec]):
         )
 
         # use metadata to set defaults for instance-level attributes
-        cls.model_fields["apiVersion"].default = api_version
+        cls.model_fields["api_version"].default = api_version
         cls.model_fields["kind"].default = kind
 
         # register model with lightkube
@@ -182,10 +221,10 @@ class Operator:
     Implements a base operator class on which concrete operators can be built.
     """
 
-    # health fastapi instance
-    health_fastapi: fastapi.FastAPI
-    # port used for health endpoint server
-    health_port: int
+    # fastapi instance
+    api: fastapi.FastAPI
+    # port used for fastapi instance
+    api_port: int
     # a client capable of communcating with kubernetes
     kube_client: lightkube.core.async_client.AsyncClient
     # an (optional) path to a kubeconfig file
@@ -200,12 +239,12 @@ class Operator:
     def __init__(
         self,
         *,
-        health_port: int | None = None,
+        api_port: int | None = None,
         kube_config: pathlib.Path | None = None,
         logger: logging.Logger,
     ):
-        self.health_fastapi = fastapi.FastAPI()
-        self.health_port = health_port or 8888
+        self.api = fastapi.FastAPI()
+        self.api_port = api_port or 8888
         self.kube_client = cast(lightkube.core.async_client.AsyncClient, None)
         self.kube_config = kube_config
         self.logger = logger
@@ -217,7 +256,7 @@ class Operator:
         kopf.on.login(registry=self.registry)(cast(Any, on_login))
         kopf.on.startup(registry=self.registry)(on_startup)
 
-        self.health_fastapi.add_api_route("/healthz", self.health, methods=["GET"])
+        self.api.add_api_route("/healthz", self.health, methods=["GET"])
 
     def watch_resource(
         self,
@@ -366,9 +405,13 @@ class Operator:
         """
         Called when a watched kubernetes resource is created
         """
+        patch.status["synced"] = False
+
         model = resource_cls.model_validate(dict(body))
         await callback(model, logger=logger)
         patch.status["currentSpec"] = model.to_dict()["spec"]
+
+        patch.status["synced"] = True
 
     def apply_diff_item(self, data: dict, diff_item: kopf.DiffItem):
         """
@@ -412,16 +455,20 @@ class Operator:
                 patch=patch,
             )
 
+        patch.status["synced"] = False
+
         # calculate the diff between the desired spec and the current spec
         current = dict(body["status"]["currentSpec"])
         desired = dict(body["spec"])
         diff_items = kopf._cogs.structs.diffs.diff(current, desired)
 
         # incrementally update the resource
+        fully_synced = True
         for diff_item in diff_items:
             if diff_item[1] in resource_cls.__oc_immutable_fields__:
                 # do not attempt to mutate immutable fields
                 logger.info(f"ignoring immutable field: {diff_item[1]}")
+                fully_synced = False
                 continue
             # apply diff item to create an updated model
             current = self.apply_diff_item(current, diff_item)
@@ -432,6 +479,8 @@ class Operator:
             await callback(model, logger=logger)
             # update status if update successful
             patch.status["currentSpec"] = current
+
+        patch.status["synced"] = fully_synced
 
     async def resource_delete(
         self,
@@ -505,7 +554,7 @@ class Operator:
 
         # create healthcheck server
         server = uvicorn.Server(
-            ServerConfig(app=self.health_fastapi, host="0.0.0.0", port=self.health_port)
+            ServerConfig(app=self.api, host="0.0.0.0", port=self.api_port)
         )
 
         await asyncio.gather(
@@ -517,6 +566,7 @@ class Operator:
 
 
 __all__ = [
+    "BaseModel",
     "GlobalResource",
     "NamespacedResource",
     "OperatorError",

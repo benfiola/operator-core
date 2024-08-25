@@ -10,8 +10,9 @@ This repository holds the source code for the `bfiola-operator-core` package tha
 - Base operator class that:
   - Creates a kubernetes client
   - Performs operator login
-  - Exposes a healthcheck endpoint
-  - Simplifies resource management (requiring only a `sync` and `delete` method per resource)
+  - Embeds a web framework with a health endpoint
+  - Manages boilerplate resource serialization and status handling
+  - Simplified resource watch behavior backed by `create`, `update` and `delete` callbacks.
 
 ## Usage
 
@@ -23,7 +24,7 @@ pip install bfiola-operator-core
 
 A full-featured example can be found in the [minio-operator-ext repository](https://github.com/benfiola/minio-operator-ext/blob/main/minio_operator_ext/operator.py)
 
-A simple example can be found in the [sample launch script](./dev.template.py).
+A simple example can be found in the [sample launch script](./dev.template.py) backed by [sample crds](./manifests/crds.yaml).
 
 ## Development
 
