@@ -310,9 +310,11 @@ class Operator:
         """
         event_name = event
         if body:
+            api_version = body["apiVersion"]
+            kind = body["kind"]
             namespace = body["metadata"].get("namespace", "<cluster>")
             name = body["metadata"]["name"]
-            event_name = f"{event_name}:{namespace}/{name}"
+            event_name = f"{event_name}:{api_version}/{kind}:{namespace}/{name}"
 
         try:
             self.logger.info(f"{event_name} started")

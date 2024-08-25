@@ -38,7 +38,7 @@ From the project root, run the following to create a development cluster to test
 
 ```shell
 cd /workspaces/operator-core
-./scripts/dev.sh
+./dev/create-cluster.sh
 ```
 
 This will:
