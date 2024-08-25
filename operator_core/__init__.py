@@ -94,7 +94,7 @@ class ResourceStatus(BaseModel, Generic[ResourceSpec]):
     """
 
     # the currently applied spec for the resource (can differ from the resource 'spec' when an invalid edit is made)
-    currentSpec: ResourceSpec | None = None
+    current_spec: ResourceSpec | None = None
 
 
 class ResourceMeta(TypedDict):
@@ -112,7 +112,7 @@ class BaseResource(BaseModel, Generic[ResourceSpec]):
     Provides custom fields and functionality between both GlobalResource and NamespacedResource classes.
     """
 
-    apiVersion: str = ""
+    api_version: str = ""
     kind: str = ""
     metadata: lightkube.models.meta_v1.ObjectMeta
     spec: ResourceSpec
@@ -165,7 +165,7 @@ class BaseResource(BaseModel, Generic[ResourceSpec]):
         )
 
         # use metadata to set defaults for instance-level attributes
-        cls.model_fields["apiVersion"].default = api_version
+        cls.model_fields["api_version"].default = api_version
         cls.model_fields["kind"].default = kind
 
         # register model with lightkube
